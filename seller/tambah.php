@@ -1,173 +1,211 @@
 <?php
 session_start();
 include '../db_connection.php';
+include '../view/header.php';
 
-// FIX 1: Pengecekan session diubah ke 'pengguna_id' dan role 'seller'
-if (!isset($_SESSION['pengguna_id']) || !isset($_SESSION['role']) || $_SESSION['role'] != 'seller') {
+// Keamanan: Pastikan hanya seller yang bisa mengakses.
+if (!isset($_SESSION['pengguna_id']) || !isset($_SESSION['role']) || $_SESSION['role'] !== 'seller') {
     header("Location: ../pages/login.php");
     exit;
 }
-$pengguna_id = $_SESSION['pengguna_id'];
+
+$seller_id = $_SESSION['pengguna_id'];
+// Ambil data untuk dropdown form
+$categories = $conn->query("SELECT * FROM kategori ORDER BY nama_kategori");
+$colors = $conn->query("SELECT * FROM warna ORDER BY nama_warna");
+$sizes = $conn->query("SELECT * FROM ukuran ORDER BY ukuran_id");
 
 $error_msg = '';
 $success_msg = '';
 
-if (isset($_POST['simpan'])) {
-    // Mengambil dan membersihkan data dari form
-    $nama = htmlspecialchars($_POST['nama']);
-    $deskripsi = htmlspecialchars($_POST['deskripsi']);
-    $harga = floatval($_POST['harga']);
-    $kategori_id = intval($_POST['kategori_id']);
-    $kondisi = htmlspecialchars($_POST['kondisi']);
-    $stok_keseluruhan = intval($_POST['stok_keseluruhan']);
+// Proses form jika di-submit
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    $nama_produk = trim($_POST['nama_produk']);
+    $deskripsi = trim($_POST['deskripsi']);
+    $harga = $_POST['harga'];
+    $kategori_id = $_POST['kategori_id'];
+    $kondisi = $_POST['kondisi'];
+    $variants = $_POST['variants'] ?? [];
     
-    // DIHAPUS: Logika untuk memproses stok warna dan ukuran karena kolom tidak ada di DB
-
-    $upload_dir = "../uploads/";
-    $allowed_ext = ['jpg', 'jpeg', 'png', 'gif'];
-    $new_filename = '';
-
-    // Validasi dan upload gambar utama
-    if (isset($_FILES['gambar']) && $_FILES['gambar']['error'] === UPLOAD_ERR_OK) {
-        $gambar = $_FILES['gambar']['name'];
-        $tmp_name = $_FILES['gambar']['tmp_name'];
-        $file_ext = strtolower(pathinfo($gambar, PATHINFO_EXTENSION));
-
-        if (in_array($file_ext, $allowed_ext)) {
-            $new_filename = time() . '_' . uniqid() . '.' . $file_ext;
-            $target_file = $upload_dir . $new_filename;
-            if (!move_uploaded_file($tmp_name, $target_file)) {
-                $error_msg = "Gagal mengupload gambar utama.";
-            }
-        } else {
-            $error_msg = "Format gambar utama tidak diizinkan. Gunakan jpg, jpeg, png, atau gif.";
+    // Hitung total stok dari semua varian yang valid
+    $total_stock = 0;
+    $valid_variants = [];
+    foreach ($variants as $variant) {
+        if (!empty($variant['size']) && !empty($variant['color']) && !empty($variant['stock'])) {
+            $total_stock += intval($variant['stock']);
+            $valid_variants[] = $variant;
         }
-    } else {
-        $error_msg = "Gambar utama wajib diunggah.";
     }
 
-    // Lanjutkan hanya jika tidak ada error upload
+    $foto_url = '';
+    // Validasi & Upload Foto Utama
+    if (isset($_FILES['foto_utama']) && $_FILES['foto_utama']['error'] == 0) {
+        $target_dir = "../uploads/";
+        $file_extension = strtolower(pathinfo($_FILES['foto_utama']['name'], PATHINFO_EXTENSION));
+        $allowed_types = ['jpg', 'jpeg', 'png', 'gif'];
+        if (in_array($file_extension, $allowed_types)) {
+            $foto_url = "produk_" . time() . '_' . bin2hex(random_bytes(8)) . '.' . $file_extension;
+            if (!move_uploaded_file($_FILES['foto_utama']['tmp_name'], $target_dir . $foto_url)) {
+                $error_msg = "Gagal mengupload foto utama.";
+                $foto_url = ''; // Kosongkan jika gagal upload
+            }
+        } else {
+            $error_msg = "Format foto utama tidak valid. Gunakan jpg, jpeg, png, atau gif.";
+        }
+    } else {
+        $error_msg = "Foto utama wajib diisi.";
+    }
+
+   
     if (empty($error_msg)) {
-        // FIX 2: Query INSERT ditulis ulang sepenuhnya menggunakan prepared statement
-        $sql = "INSERT INTO produk (nama_produk, deskripsi, stock, harga, foto_url, seller_id, kategori_id, kondisi, verified) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)";
-        
-        $stmt = $conn->prepare($sql);
-        // Tipe data: s=string, i=integer, d=double
-        $stmt->bind_param('ssidsiis', $nama, $deskripsi, $stok_keseluruhan, $harga, $new_filename, $pengguna_id, $kategori_id, $kondisi);
+        $conn->begin_transaction();
+        try {
+            // Insert data produk utama
+            $stmt_produk = $conn->prepare("INSERT INTO produk (nama_produk, deskripsi, harga, stock, seller_id, kategori_id, kondisi, foto_url, verified) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)");
+            $stmt_produk->bind_param("ssdiisss", $nama_produk, $deskripsi, $harga, $total_stock, $seller_id, $kategori_id, $kondisi, $foto_url);
+            if (!$stmt_produk->execute()) throw new Exception("Gagal menyimpan data produk utama.");
+            $produk_id = $stmt_produk->insert_id;
+            $stmt_produk->close();
+            
+            // Insert data varian produk
+            if (!empty($valid_variants)) {
+                $stmt_varian = $conn->prepare("INSERT INTO produk_varian (produk_id, ukuran_id, warna_id, stock) VALUES (?, ?, ?, ?)");
+                foreach ($valid_variants as $variant) {
+                    $stmt_varian->bind_param("iiii", $produk_id, $variant['size'], $variant['color'], $variant['stock']);
+                    if (!$stmt_varian->execute()) throw new Exception("Gagal menyimpan data varian.");
+                }
+                $stmt_varian->close();
+            }
 
-        if ($stmt->execute()) {
-            $produk_id = $stmt->insert_id;
-
-            // Upload foto detail produk jika ada
-            if (!empty($_FILES['foto_detail']['name'][0])) {
-                foreach ($_FILES['foto_detail']['name'] as $key => $filename) {
-                    if ($_FILES['foto_detail']['error'][$key] === UPLOAD_ERR_OK) {
-                        $tmp_name_detail = $_FILES['foto_detail']['tmp_name'][$key];
-                        $file_ext_detail = strtolower(pathinfo($filename, PATHINFO_EXTENSION));
-                        if (in_array($file_ext_detail, $allowed_ext)) {
-                            $new_file_detail = time() . '_' . uniqid() . '_detail.' . $file_ext_detail;
-                            $target_file_detail = $upload_dir . $new_file_detail;
-
-                            if (move_uploaded_file($tmp_name_detail, $target_file_detail)) {
-                                $stmt2 = $conn->prepare("INSERT INTO produk_foto_detail (produk_id, foto_path) VALUES (?, ?)");
-                                $stmt2->bind_param("is", $produk_id, $new_file_detail);
-                                $stmt2->execute();
-                                $stmt2->close();
+            // Proses upload foto detail
+            if (isset($_FILES['foto_detail']) && count($_FILES['foto_detail']['name']) > 0) {
+                $stmt_foto_detail = $conn->prepare("INSERT INTO produk_foto_detail (produk_id, foto_path) VALUES (?, ?)");
+                foreach ($_FILES['foto_detail']['name'] as $key => $name) {
+                    if ($_FILES['foto_detail']['error'][$key] == 0) {
+                        $detail_file_ext = strtolower(pathinfo($name, PATHINFO_EXTENSION));
+                        if (in_array($detail_file_ext, $allowed_types)) {
+                            $detail_foto_path = "detail_" . $produk_id . "_" . time() . '_' . $key . '.' . $detail_file_ext;
+                            if(move_uploaded_file($_FILES['foto_detail']['tmp_name'][$key], $target_dir . $detail_foto_path)) {
+                                $stmt_foto_detail->bind_param("is", $produk_id, $detail_foto_path);
+                                if (!$stmt_foto_detail->execute()) throw new Exception("Gagal menyimpan foto detail.");
                             }
                         }
                     }
                 }
+                $stmt_foto_detail->close();
             }
 
-            $success_msg = "Produk berhasil ditambahkan dan menunggu verifikasi admin.";
-            // Menggunakan meta refresh untuk redirect setelah menampilkan pesan
-            echo '<meta http-equiv="refresh" content="2;url=produk.php">';
-        } else {
-            $error_msg = "Gagal menyimpan produk: " . $stmt->error;
+            $conn->commit();
+            $success_msg = "Produk berhasil ditambahkan! Admin akan segera memverifikasi produk Anda.";
+        } catch (Exception $e) {
+            $conn->rollback();
+            $error_msg = "Terjadi kegagalan: " . $e->getMessage();
+            if (!empty($foto_url) && file_exists($target_dir . $foto_url)) {
+                unlink($target_dir . $foto_url);
+            }
         }
-        $stmt->close();
     }
 }
 ?>
 
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>Tambah Produk</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-</head>
-<body class="container py-5">
-    <div class="row">
-        <div class="col-md-8 offset-md-2">
-            <h2 class="mb-4">Tambah Produk Baru</h2>
-
-            <?php if ($success_msg): ?>
-                <div class="alert alert-success"><?= $success_msg ?></div>
-            <?php endif; ?>
-            <?php if ($error_msg): ?>
-                <div class="alert alert-danger"><?= $error_msg ?></div>
-            <?php endif; ?>
-
-            <form method="POST" enctype="multipart/form-data">
-                <div class="mb-3">
-                    <label class="form-label">Nama Produk</label>
-                    <input type="text" name="nama" class="form-control" required>
-                </div>
-                <div class="mb-3">
-                    <label class="form-label">Deskripsi</label>
-                    <textarea name="deskripsi" class="form-control" rows="4" required></textarea>
-                </div>
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Harga</label>
-                        <input type="number" name="harga" class="form-control" placeholder="Contoh: 50000" required>
-                    </div>
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Stok Keseluruhan</label>
-                        <input type="number" name="stok_keseluruhan" class="form-control" min="0" required>
-                    </div>
-                </div>
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Gambar Utama (Wajib)</label>
-                        <input type="file" name="gambar" class="form-control" accept="image/*" required>
-                    </div>
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Gambar Detail (Opsional)</label>
-                        <input type="file" name="foto_detail[]" class="form-control" accept="image/*" multiple>
-                    </div>
-                </div>
-                <div class="row">
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Kategori</label>
-                        <select name="kategori_id" class="form-control" required>
-                            <option value="">-- Pilih Kategori --</option>
-                            <?php
-                            $kategori_result = $conn->query("SELECT * FROM kategori ORDER BY nama_kategori");
-                            while ($row = $kategori_result->fetch_assoc()) {
-                                echo "<option value='{$row['kategori_id']}'>{$row['nama_kategori']}</option>";
-                            }
-                            ?>
-                        </select>
-                    </div>
-                    <div class="col-md-6 mb-3">
-                        <label class="form-label">Kondisi Produk</label>
-                        <select name="kondisi" class="form-control" required>
-                            <option value="">-- Pilih Kondisi --</option>
-                            <option value="Baru">Baru</option>
-                            <option value="Bekas">Bekas</option>
-                        </select>
-                    </div>
-                </div>
-                
-                <div class="mt-4">
-                    <button type="submit" class="btn btn-primary" name="simpan">Simpan Produk</button>
-                    <a href="produk.php" class="btn btn-secondary">Batal</a>
-                </div>
-            </form>
+<div class="container mx-auto mt-10 p-5">
+    <div class="bg-white p-8 rounded-lg shadow-lg max-w-4xl mx-auto">
+        <div class="flex justify-between items-center mb-6">
+            <h1 class="text-3xl font-bold text-gray-800">Tambah Produk Baru</h1>
+            <a href="profile.php" class="text-blue-600 hover:underline">&larr; Kembali ke Profil</a>
         </div>
+        
+        <?php if ($error_msg): ?>
+        <div class="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 mb-4" role="alert"><p><?= $error_msg ?></p></div>
+        <?php endif; ?>
+        <?php if ($success_msg): ?>
+        <div class="bg-green-100 border-l-4 border-green-500 text-green-700 p-4 mb-4" role="alert">
+            <p><?= $success_msg ?></p>
+            <a href="profile.php" class="font-bold hover:underline mt-2 inline-block">Lihat di Dashboard Profil Anda &rarr;</a>
+        </div>
+        <?php endif; ?>
+
+        <form action="tambah.php" method="POST" enctype="multipart/form-data">
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <div>
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Nama Produk</label>
+                        <input type="text" name="nama_produk" class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 focus:outline-none focus:ring-2 focus:ring-blue-500" required>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Deskripsi</label>
+                        <textarea name="deskripsi" class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700 h-32 focus:outline-none focus:ring-2 focus:ring-blue-500" required></textarea>
+                    </div>
+                    <div class="grid grid-cols-2 gap-4 mb-4">
+                        <div>
+                            <label class="block text-gray-700 text-sm font-bold mb-2">Kategori</label>
+                            <select name="kategori_id" class="shadow border rounded w-full py-2 px-3 text-gray-700" required>
+                                <?php $categories->data_seek(0); while ($cat = $categories->fetch_assoc()): ?>
+                                <option value="<?= $cat['kategori_id'] ?>"><?= htmlspecialchars($cat['nama_kategori']) ?></option>
+                                <?php endwhile; ?>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block text-gray-700 text-sm font-bold mb-2">Kondisi</label>
+                            <select name="kondisi" class="shadow border rounded w-full py-2 px-3 text-gray-700" required>
+                                <option value="Baru">Baru</option>
+                                <option value="Bekas">Bekas</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Harga (Rp)</label>
+                        <input type="number" name="harga" class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" required min="0">
+                    </div>
+                </div>
+                <div>
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Foto Utama (Wajib)</label>
+                        <input type="file" name="foto_utama" class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" required accept="image/*">
+                    </div>
+                    <div class="mb-4">
+                        <label class="block text-gray-700 text-sm font-bold mb-2">Foto Detail (Opsional)</label>
+                        <input type="file" name="foto_detail[]" class="shadow appearance-none border rounded w-full py-2 px-3 text-gray-700" multiple accept="image/*">
+                    </div>
+                    <div id="variants-container" class="mb-4 border-t pt-4">
+                        <h3 class="text-lg font-bold mb-2">Varian & Stok</h3>
+                        <div class="variant-item grid grid-cols-11 gap-2 items-center mb-2">
+                            <div class="col-span-4"><select name="variants[0][size]" class="w-full border rounded p-2 text-sm"><option value="">Ukuran</option><?php $sizes->data_seek(0); while($s = $sizes->fetch_assoc()): ?><option value="<?= $s['ukuran_id'] ?>"><?= $s['nama_ukuran'] ?></option><?php endwhile; ?></select></div>
+                            <div class="col-span-4"><select name="variants[0][color]" class="w-full border rounded p-2 text-sm"><option value="">Warna</option><?php $colors->data_seek(0); while($c = $colors->fetch_assoc()): ?><option value="<?= $c['warna_id'] ?>"><?= $c['nama_warna'] ?></option><?php endwhile; ?></select></div>
+                            <div class="col-span-3"><input type="number" name="variants[0][stock]" class="w-full border rounded p-2 text-sm" placeholder="Stok" min="0"></div>
+                        </div>
+                    </div>
+                    <button type="button" id="add-variant" class="text-sm bg-gray-200 hover:bg-gray-300 text-gray-700 font-semibold py-2 px-4 rounded w-full">Tambah Varian Lain</button>
+                </div>
+            </div>
+            <div class="flex items-center justify-end mt-6 border-t pt-6">
+                <button type="submit" class="bg-indigo-600 hover:bg-indigo-800 text-white font-bold py-3 px-6 rounded-lg focus:outline-none focus:shadow-outline transition-colors">
+                    Simpan Produk
+                </button>
+            </div>
+        </form>
     </div>
-</body>
-</html>
+</div>
+<script>
+document.getElementById('add-variant').addEventListener('click', function() {
+    const container = document.getElementById('variants-container');
+    const index = container.getElementsByClassName('variant-item').length;
+    const newItem = document.createElement('div');
+    newItem.className = 'variant-item grid grid-cols-11 gap-2 items-center mb-2';
+    const sizeOptions = container.querySelector('select[name^="variants[0][size]"]').innerHTML;
+    const colorOptions = container.querySelector('select[name^="variants[0][color]"]').innerHTML;
+    newItem.innerHTML = `
+        <div class="col-span-4"><select name="variants[${index}][size]" class="w-full border rounded p-2 text-sm">${sizeOptions}</select></div>
+        <div class="col-span-4"><select name="variants[${index}][color]" class="w-full border rounded p-2 text-sm">${colorOptions}</select></div>
+        <div class="col-span-2"><input type="number" name="variants[${index}][stock]" class="w-full border rounded p-2 text-sm" placeholder="Stok" min="0"></div>
+        <div class="col-span-1 text-right"><button type="button" class="remove-variant text-red-500 hover:text-red-700 text-xl font-bold">&times;</button></div>
+    `;
+    container.appendChild(newItem);
+});
+document.getElementById('variants-container').addEventListener('click', function(e) {
+    if (e.target && e.target.classList.contains('remove-variant')) {
+        e.target.closest('.variant-item').remove();
+    }
+});
+</script>
+<?php include '../view/footer.php'; ?>

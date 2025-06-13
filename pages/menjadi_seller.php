@@ -24,8 +24,8 @@ $success = '';
 
 // 3. Proses Form Jika di-Submit
 if ($_SERVER["REQUEST_METHOD"] == "POST") {
-    $nama_toko = $_POST['nama_toko'];
-    $alamat_toko = $_POST['alamat_toko'];
+    $nama_toko = htmlspecialchars(trim($_POST['nama_toko']));
+    $alamat_toko = htmlspecialchars(trim($_POST['alamat_toko']));
 
     if (empty($nama_toko) || empty($alamat_toko)) {
         $error = "Nama toko dan alamat tidak boleh kosong.";
@@ -46,7 +46,6 @@ if ($_SERVER["REQUEST_METHOD"] == "POST") {
         $stmt->close();
     }
 }
-$conn->close();
 
 // Sertakan header
 include '../view/header.php';
@@ -92,4 +91,7 @@ include '../view/header.php';
 <?php
 // Sertakan footer
 include '../view/footer.php';
+
+// PERBAIKAN: Koneksi ditutup di paling akhir setelah semua selesai.
+$conn->close();
 ?>

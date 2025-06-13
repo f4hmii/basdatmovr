@@ -1,36 +1,33 @@
 <?php
 session_start();
 include '../db_connection.php';
-include '../view/header.php';
 
-// FIX 1: Pengecekan session diubah dari 'user_id' menjadi 'pengguna_id'
-if (!isset($_SESSION['pengguna_id']) || $_SESSION['role'] !== 'seller') {
+// Pastikan hanya seller yang bisa mengakses halaman ini
+if (!isset($_SESSION['role']) || $_SESSION['role'] !== 'seller') {
     header("Location: ../pages/login.php");
     exit();
 }
 
-// Mengambil ID seller dari session
 $seller_id = $_SESSION['pengguna_id'];
 
-// FIX 2: Query diubah menggunakan prepared statement dan JOIN yang lebih efisien
-// FIX 3: Menghapus kolom 'status_transaksi' yang tidak ada di database
+// Mengambil pesanan yang mengandung produk dari seller yang sedang login
 $sql = "
     SELECT 
         t.transaksi_id, 
-        p.nama_pengguna, 
-        p.email,
+        p.nama_pengguna AS nama_pembeli, 
         t.total_harga, 
-        t.alamat_pengiriman, 
-        t.metode_pembayaran, 
         t.tanggal, 
-        t.status_pembayaran,
-        GROUP_CONCAT(CONCAT(prod.nama_produk, ' (', td.quantity, 'x)') SEPARATOR '<br>') as produk_dibeli
+        pb.status_pembayaran, -- Mengambil status dari tabel pembayaran
+        GROUP_CONCAT(CONCAT(prod.nama_produk, ' (', td.quantity, 'x)') SEPARATOR '<br>') as produk_dibeli,
+        ap.alamat, ap.kecamatan, ap.kabupaten_kota, ap.provinsi, ap.kode_pos
     FROM transaksi t
     JOIN pengguna p ON t.pengguna_id = p.pengguna_id
     JOIN transaksi_detail td ON t.transaksi_id = td.transaksi_id
     JOIN produk prod ON td.produk_id = prod.produk_id
+    LEFT JOIN alamat_pengiriman ap ON t.alamat_id = ap.alamat_id
+    LEFT JOIN pembayaran pb ON t.transaksi_id = pb.transaksi_id -- JOIN ke tabel pembayaran
     WHERE prod.seller_id = ?
-    GROUP BY t.transaksi_id, p.nama_pengguna, p.email, t.total_harga, t.alamat_pengiriman, t.metode_pembayaran, t.tanggal, t.status_pembayaran
+    GROUP BY t.transaksi_id, p.nama_pengguna, t.total_harga, t.tanggal, pb.status_pembayaran
     ORDER BY t.tanggal DESC
 ";
 
@@ -38,80 +35,93 @@ $stmt = $conn->prepare($sql);
 $stmt->bind_param("i", $seller_id);
 $stmt->execute();
 $result = $stmt->get_result();
-
 ?>
 
 <!DOCTYPE html>
 <html lang="id">
 <head>
     <meta charset="UTF-8">
-    <title>Kelola Pesanan</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kelola Pesanan - Seller MOVR</title>
+    <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
 </head>
-<body class="bg-gray-100">
+<body class="bg-gray-100 font-sans">
+    <?php include '../view/header.php'; ?>
 
-<div class="container mx-auto px-4 py-8">
-    <h1 class="text-3xl font-bold text-gray-800 mb-6">Kelola Pesanan Masuk</h1>
+    <div class="container mx-auto mt-10 p-4">
+        <h1 class="text-3xl font-bold mb-6">Kelola Pesanan Masuk</h1>
 
-    <div class="bg-white shadow-md rounded-lg overflow-x-auto">
-        <table class="min-w-full leading-normal">
-            <thead>
-                <tr>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">ID Transaksi</th>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Pembeli</th>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Produk Dipesan</th>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Total Harga</th>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Alamat Kirim</th>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Tanggal</th>
-                    <th class="px-5 py-3 border-b-2 border-gray-200 bg-gray-100 text-left text-xs font-semibold text-gray-600 uppercase tracking-wider">Status Bayar</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php if ($result->num_rows > 0): ?>
-                    <?php while($row = $result->fetch_assoc()): ?>
+        <div class="bg-white shadow-md rounded-lg overflow-x-auto">
+            <table class="min-w-full leading-normal">
+                <thead>
+                    <tr class="bg-gray-800 text-white uppercase text-sm">
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-left">ID Transaksi</th>
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-left">Tanggal</th>
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-left">Pembeli</th>
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-left">Produk</th>
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-left">Total</th>
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-left">Alamat Pengiriman</th>
+                        <th class="px-5 py-3 border-b-2 border-gray-200 text-center">Status Pembayaran</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <?php if ($result->num_rows > 0): ?>
+                        <?php while($row = $result->fetch_assoc()): ?>
+                            <tr class="hover:bg-gray-50">
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
+                                    <p class="text-gray-900 whitespace-no-wrap"><?= htmlspecialchars($row['transaksi_id']) ?></p>
+                                </td>
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
+                                    <p class="text-gray-900 whitespace-no-wrap"><?= htmlspecialchars(date("d M Y, H:i", strtotime($row['tanggal']))) ?></p>
+                                </td>
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
+                                    <p class="text-gray-900 whitespace-no-wrap"><?= htmlspecialchars($row['nama_pembeli']) ?></p>
+                                </td>
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
+                                    <div class="text-gray-900 whitespace-no-wrap"><?= $row['produk_dibeli'] ?></div>
+                                </td>
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
+                                    <p class="text-gray-900 whitespace-no-wrap font-semibold">Rp <?= htmlspecialchars(number_format($row['total_harga'], 0, ',', '.')) ?></p>
+                                </td>
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
+                                    <p class="text-gray-900 whitespace-no-wrap">
+                                        <?= htmlspecialchars($row['alamat'] . ', ' . $row['kecamatan'] . ', ' . $row['kabupaten_kota'] . ', ' . $row['provinsi'] . ' ' . $row['kode_pos']) ?>
+                                    </p>
+                                </td>
+                                <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm text-center">
+                                    <?php
+                                        $status_bayar = $row['status_pembayaran'] ?? 'pending';
+                                        $color = 'bg-gray-200 text-gray-800';
+                                        if ($status_bayar == 'confirmed') {
+                                            $color = 'bg-green-200 text-green-800';
+                                        } elseif ($status_bayar == 'pending') {
+                                            $color = 'bg-yellow-200 text-yellow-800';
+                                        } elseif ($status_bayar == 'rejected') {
+                                            $color = 'bg-red-200 text-red-800';
+                                        }
+                                    ?>
+                                    <span class="relative inline-block px-3 py-1 font-semibold leading-tight rounded-full <?= $color ?>">
+                                        <?= htmlspecialchars(ucfirst($status_bayar)) ?>
+                                    </span>
+                                </td>
+                            </tr>
+                        <?php endwhile; ?>
+                    <?php else: ?>
                         <tr>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">#<?= htmlspecialchars($row['transaksi_id']) ?></td>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
-                                <p class="text-gray-900 whitespace-no-wrap"><?= htmlspecialchars($row['nama_pengguna']) ?></p>
-                                <p class="text-gray-600 whitespace-no-wrap text-xs"><?= htmlspecialchars($row['email']) ?></p>
-                            </td>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm"><?= $row['produk_dibeli'] // Tidak perlu htmlspecialchars karena sudah digabung dengan aman di query ?></td>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">Rp <?= number_format($row['total_harga'], 0, ',', '.') ?></td>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm"><?= htmlspecialchars($row['alamat_pengiriman']) ?></td>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm"><?= date('d M Y H:i', strtotime($row['tanggal'])) ?></td>
-                            <td class="px-5 py-5 border-b border-gray-200 bg-white text-sm">
-                                <?php 
-                                    $status_bayar = $row['status_pembayaran'];
-                                    $color = 'text-gray-600';
-                                    if ($status_bayar == 'dibayar') {
-                                        $color = 'text-green-600';
-                                    } elseif ($status_bayar == 'belum') {
-                                        $color = 'text-red-600';
-                                    }
-                                ?>
-                                <span class="relative inline-block px-3 py-1 font-semibold <?= $color ?> leading-tight">
-                                    <span aria-hidden class="absolute inset-0 opacity-50 rounded-full"></span>
-                                    <span class="relative"><?= ucfirst($status_bayar) ?></span>
-                                </span>
+                            <td colspan="7" class="text-center py-10">
+                                <p class="text-gray-500">Belum ada pesanan yang masuk.</p>
                             </td>
                         </tr>
-                    <?php endwhile; ?>
-                <?php else: ?>
-                    <tr>
-                        <td colspan="7" class="text-center py-10">
-                            <p class="text-gray-500">Belum ada pesanan yang masuk untuk produk Anda.</p>
-                        </td>
-                    </tr>
-                <?php endif; ?>
-            </tbody>
-        </table>
+                    <?php endif; ?>
+                </tbody>
+            </table>
+        </div>
     </div>
-</div>
 
+    <?php include '../view/footer.php'; ?>
+</body>
+</html>
 <?php
 $stmt->close();
 $conn->close();
-include '../view/footer.php';
 ?>
-</body>
-</html>
